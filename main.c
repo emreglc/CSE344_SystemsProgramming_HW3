@@ -9,14 +9,14 @@
 #include <limits.h>     // for INT_MIN
 
 #define TIMEOUT 5
-#define WORK_TIME 9
+#define WORK_TIME 4
 #define NUM_SATELLITES 5
-#define NUM_ENGINEERS 3
+#define NUM_ENGINEERS 2
 
 // --- Priority queue data structures ---
 typedef struct Satellite {
-    int             id;
-    int             priority;
+    int               id;
+    int               priority;
     sem_t* reply;    // per‑satellite semaphore (NULL for shutdown)
     struct Satellite* next;
 } Satellite;
@@ -32,6 +32,9 @@ PriorityQueue queue = { NULL, PTHREAD_MUTEX_INITIALIZER };
 sem_t            newRequest;
 pthread_mutex_t  requestMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t  engineerMutex = PTHREAD_MUTEX_INITIALIZER;
+
+// counter as required by the spec
+int availableEngineers = NUM_ENGINEERS;
 
 // Remove a request by its ID from the queue (call with queue.lock held)
 void remove_request_by_id(int id) {
@@ -49,7 +52,7 @@ void remove_request_by_id(int id) {
     }
 }
 
-// Enqueue (normal) in descending priority order
+// Enqueue a real request, storing the per‑sat semaphore
 void enqueue_with_sem(int id, int priority, sem_t* reply) {
     pthread_mutex_lock(&queue.lock);
     Satellite* s = malloc(sizeof * s);
@@ -71,7 +74,7 @@ void enqueue_with_sem(int id, int priority, sem_t* reply) {
     pthread_mutex_unlock(&queue.lock);
 }
 
-// Dequeue highest‑priority request
+// Dequeue highest‑priority request (or shutdown pill)
 Satellite* dequeue() {
     pthread_mutex_lock(&queue.lock);
     Satellite* s = queue.head;
@@ -87,22 +90,21 @@ void* satellite(void* arg) {
         priority = params[1];
     free(params);
 
-    // 1) per‑satellite semaphore
+    // per‑satellite semaphore
     sem_t satSem;
     sem_init(&satSem, 0, 0);
 
+    // original print
     printf("[SATELLITE] Satellite %d is waiting for an engineer (priority %d)\n",
         id, priority);
 
-    // 2) enqueue + signal
+    // enqueue + signal engineers
     pthread_mutex_lock(&requestMutex);
-    pthread_mutex_lock(&engineerMutex);
     enqueue_with_sem(id, priority, &satSem);
-    pthread_mutex_unlock(&engineerMutex);
     sem_post(&newRequest);
     pthread_mutex_unlock(&requestMutex);
 
-    // 3) wait (with timeout)
+    // wait (with timeout)
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += TIMEOUT;
@@ -111,7 +113,7 @@ void* satellite(void* arg) {
         if (errno == ETIMEDOUT) {
             printf("[TIMEOUT] Satellite %d timed out (no engineer in %d seconds)\n",
                 id, TIMEOUT);
-            // remove stale request
+            // remove stale entry
             pthread_mutex_lock(&queue.lock);
             remove_request_by_id(id);
             pthread_mutex_unlock(&queue.lock);
@@ -128,16 +130,14 @@ void* satellite(void* arg) {
 // --- Engineer thread ---
 void* engineer(void* arg) {
     long eid = (long)arg;
+    // allow cancellation at sem_wait if used
     pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
 
     while (1) {
         sem_wait(&newRequest);
 
-        pthread_mutex_lock(&engineerMutex);
         Satellite* sat = dequeue();
-        pthread_mutex_unlock(&engineerMutex);
-
         if (!sat) continue;
 
         // shutdown pill?
@@ -146,21 +146,31 @@ void* engineer(void* arg) {
             break;
         }
 
+        // decrement availableEngineers
+        pthread_mutex_lock(&engineerMutex);
+        availableEngineers--;
+        pthread_mutex_unlock(&engineerMutex);
+
         printf("[ENGINEER %ld] Handling satellite %d (priority: %d)\n",
             eid, sat->id, sat->priority);
 
-        // signal *that* satellite
+        // wake exactly that satellite
         sem_post(sat->reply);
 
         // simulate work
         sleep(WORK_TIME);
 
+        // increment availableEngineers
+        pthread_mutex_lock(&engineerMutex);
+        availableEngineers++;
+        pthread_mutex_unlock(&engineerMutex);
+
         printf("[ENGINEER %ld] Finished Satellite %d\n", eid, sat->id);
         free(sat);
     }
 
-    sleep(1);
-    printf("[ENGINEER %ld] Shutting down...\n", eid);
+    sleep(1); // simulate shutdown time
+    printf("[ENGINEER %ld] Exiting...\n", eid);
 
     return NULL;
 }
@@ -172,29 +182,31 @@ int main(void) {
     pthread_t sats[NUM_SATELLITES];
     pthread_t engs[NUM_ENGINEERS];
 
+    // launch engineers
     for (long i = 0; i < NUM_ENGINEERS; i++) {
         pthread_create(&engs[i], NULL, engineer, (void*)i);
     }
 
+    // launch satellites
     for (int i = 0; i < NUM_SATELLITES; i++) {
         int* args = malloc(2 * sizeof(int));
         args[0] = i;
         args[1] = rand() % 5 + 1;
         pthread_create(&sats[i], NULL, satellite, args);
-        sleep(1);
     }
 
+    // wait for all satellites
     for (int i = 0; i < NUM_SATELLITES; i++) {
         pthread_join(sats[i], NULL);
     }
 
+    // now send shutdown pills
     for (int i = 0; i < NUM_ENGINEERS; i++) {
-        pthread_mutex_lock(&engineerMutex);
         enqueue_with_sem(-1, INT_MIN, NULL);
-        pthread_mutex_unlock(&engineerMutex);
         sem_post(&newRequest);
     }
 
+    // join engineers
     for (int i = 0; i < NUM_ENGINEERS; i++) {
         pthread_join(engs[i], NULL);
     }
