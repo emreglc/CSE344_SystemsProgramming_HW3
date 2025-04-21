@@ -6,12 +6,12 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
-#include <limits.h>     // for INT_MIN
+#include <limits.h>
 
 #define TIMEOUT 5
-#define WORK_TIME 4
+#define WORK_TIME 6
 #define NUM_SATELLITES 5
-#define NUM_ENGINEERS 2
+#define NUM_ENGINEERS 3
 
 // --- Priority queue data structures ---
 typedef struct Satellite {
@@ -94,7 +94,6 @@ void* satellite(void* arg) {
     sem_t satSem;
     sem_init(&satSem, 0, 0);
 
-    // original print
     printf("[SATELLITE] Satellite %d is waiting for an engineer (priority %d)\n",
         id, priority);
 
@@ -129,8 +128,9 @@ void* satellite(void* arg) {
 
 // --- Engineer thread ---
 void* engineer(void* arg) {
+
     long eid = (long)arg;
-    // allow cancellation at sem_wait if used
+
     pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
 
@@ -140,7 +140,7 @@ void* engineer(void* arg) {
         Satellite* sat = dequeue();
         if (!sat) continue;
 
-        // shutdown pill?
+        // on shutdown
         if (sat->id < 0) {
             free(sat);
             break;
@@ -206,7 +206,7 @@ int main(void) {
         sem_post(&newRequest);
     }
 
-    // join engineers
+    // wait for engineers
     for (int i = 0; i < NUM_ENGINEERS; i++) {
         pthread_join(engs[i], NULL);
     }
